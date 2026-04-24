@@ -2,10 +2,26 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck disable=SC1091
-source "$SCRIPT_DIR/../taskmaster-compliance-prompt.sh"
-# shellcheck disable=SC1091
-source "$SCRIPT_DIR/../taskmaster-state.sh"
+
+taskmaster_file() {
+  local name="$1"
+  if [[ -f "$SCRIPT_DIR/$name" ]]; then
+    printf '%s/%s\n' "$SCRIPT_DIR" "$name"
+    return 0
+  fi
+  if [[ -f "$SCRIPT_DIR/../$name" ]]; then
+    printf '%s/%s\n' "$SCRIPT_DIR/../" "$name"
+    return 0
+  fi
+  printf 'taskmaster file not found: %s\n' "$name" >&2
+  return 1
+}
+
+# shellcheck disable=SC1090
+source "$(taskmaster_file taskmaster-compliance-prompt.sh)"
+# shellcheck disable=SC1090
+source "$(taskmaster_file taskmaster-state.sh)"
+VERIFIER_SCRIPT="$(taskmaster_file taskmaster-completion-verifier.py)"
 
 INPUT="$(cat)"
 SESSION_ID="$(printf '%s' "$INPUT" | jq -r '.session_id // "unknown-session"')"
@@ -14,11 +30,14 @@ TRANSCRIPT="$(printf '%s' "$INPUT" | jq -r '.transcript_path // ""')"
 LAST_MSG="$(printf '%s' "$INPUT" | jq -r '.last_assistant_message // ""')"
 STOP_HOOK_ACTIVE="$(printf '%s' "$INPUT" | jq -r '.stop_hook_active // false')"
 CWD="$(printf '%s' "$INPUT" | jq -r '.cwd // "."')"
+MODEL="$(printf '%s' "$INPUT" | jq -r '.model // ""')"
 
 TRANSCRIPT="${TRANSCRIPT/#\~/$HOME}"
 DONE_SIGNAL="TASKMASTER_DONE::${SESSION_ID}"
 VERIFY_CMD="${TASKMASTER_VERIFY_COMMAND:-}"
 VERIFY_MAX_OUTPUT="${TASKMASTER_VERIFY_MAX_OUTPUT:-4000}"
+COMPLETION_VERIFIER_CMD="${TASKMASTER_COMPLETION_VERIFIER_COMMAND:-}"
+COMPLETION_MAX_CONTEXT_CHARS="${TASKMASTER_COMPLETION_MAX_CONTEXT_CHARS:-20000}"
 STATE_PATH="$(taskmaster_turn_state_path "$SESSION_ID")"
 
 VERIFY_NOTE=""
@@ -138,6 +157,7 @@ def is_taskmaster_internal_prompt(text: str) -> bool:
         stripped.startswith("<hook_prompt")
         or stripped.startswith("Stop is blocked until completion is explicitly confirmed.")
         or stripped.startswith("Completion check before stopping.")
+        or stripped.startswith("Goal not yet verified complete.")
         or stripped.startswith("Recent tool errors were detected.")
     )
 
@@ -170,6 +190,7 @@ run_optional_verifier() {
   local max_output="$3"
 
   [[ -n "$verifier_cmd" ]] || return 0
+  [[ -d "$cwd" ]] || cwd="."
 
   local tmp_output
   tmp_output="$(mktemp "${TMPDIR:-/tmp}/taskmaster-verify.XXXXXX")"
@@ -192,6 +213,61 @@ ${truncated}" '{ decision: "block", reason: $reason }'
 
   rm -f "$tmp_output"
   return 0
+}
+
+completion_verification_enabled() {
+  case "${TASKMASTER_COMPLETION_VERIFY:-1}" in
+    0|false|False|FALSE|off|OFF|no|NO)
+      return 1
+      ;;
+  esac
+  return 0
+}
+
+run_completion_verifier() {
+  local payload="$1"
+  local cwd="$2"
+  local tmp_output
+  local tmp_error
+
+  [[ -d "$cwd" ]] || cwd="."
+  tmp_output="$(mktemp "${TMPDIR:-/tmp}/taskmaster-completion-verifier.XXXXXX")"
+  tmp_error="$(mktemp "${TMPDIR:-/tmp}/taskmaster-completion-verifier-error.XXXXXX")"
+
+  if [[ -n "$COMPLETION_VERIFIER_CMD" ]]; then
+    (
+      cd "$cwd"
+      bash -lc "$COMPLETION_VERIFIER_CMD"
+    ) <<<"$payload" >"$tmp_output" 2>"$tmp_error" || {
+      local err
+      err="$(tail -c "$VERIFY_MAX_OUTPUT" "$tmp_error" 2>/dev/null || true)"
+      rm -f "$tmp_output" "$tmp_error"
+      jq -n --arg reason "Completion verifier command failed: ${err}" \
+        '{ complete: false, reason: $reason, next_action: "Continue working, or fix TASKMASTER_COMPLETION_VERIFIER_COMMAND." }'
+      return 0
+    }
+  else
+    "$VERIFIER_SCRIPT" <<<"$payload" >"$tmp_output" 2>"$tmp_error" || {
+      local err
+      err="$(tail -c "$VERIFY_MAX_OUTPUT" "$tmp_error" 2>/dev/null || true)"
+      rm -f "$tmp_output" "$tmp_error"
+      jq -n --arg reason "Completion verifier failed: ${err}" \
+        '{ complete: false, reason: $reason, next_action: "Continue working, or fix the completion verifier." }'
+      return 0
+    }
+  fi
+
+  if ! jq -e 'type == "object" and has("complete")' "$tmp_output" >/dev/null 2>&1; then
+    local raw
+    raw="$(tail -c "$VERIFY_MAX_OUTPUT" "$tmp_output" 2>/dev/null || true)"
+    rm -f "$tmp_output" "$tmp_error"
+    jq -n --arg reason "Completion verifier returned invalid JSON: ${raw}" \
+      '{ complete: false, reason: $reason, next_action: "Continue working, or fix the completion verifier output." }'
+    return 0
+  fi
+
+  cat "$tmp_output"
+  rm -f "$tmp_output" "$tmp_error"
 }
 
 load_latest_prompt_from_state() {
@@ -225,16 +301,56 @@ if [[ -z "$LAST_MSG" ]]; then
   LAST_MSG="$LAST_MSG_FALLBACK"
 fi
 
-if has_legacy_completion_signal "$LAST_MSG"; then
-  run_optional_verifier "$VERIFY_CMD" "$CWD" "$VERIFY_MAX_OUTPUT" || exit 0
-  exit 0
-fi
-
-if [[ "$STOP_HOOK_ACTIVE" != "true" ]]; then
-  REASON="$(build_taskmaster_stop_check_prompt "$LATEST_USER_MESSAGE" "$VERIFY_NOTE")"
-  jq -n --arg reason "$REASON" '{ decision: "block", reason: $reason }'
-  exit 0
-fi
-
 run_optional_verifier "$VERIFY_CMD" "$CWD" "$VERIFY_MAX_OUTPUT" || exit 0
-exit 0
+
+if ! completion_verification_enabled; then
+  if has_legacy_completion_signal "$LAST_MSG"; then
+    exit 0
+  fi
+  if [[ "$STOP_HOOK_ACTIVE" != "true" ]]; then
+    REASON="$(build_taskmaster_stop_check_prompt "$LATEST_USER_MESSAGE" "The semantic completion verifier is disabled, so this is a one-pass self-check." "" "$VERIFY_NOTE")"
+    jq -n --arg reason "$REASON" '{ decision: "block", reason: $reason }'
+    exit 0
+  fi
+  exit 0
+fi
+
+VERIFIER_PAYLOAD="$(
+  jq -n \
+    --arg session_id "$SESSION_ID" \
+    --arg turn_id "$TURN_ID" \
+    --arg transcript_path "$TRANSCRIPT" \
+    --arg latest_user_message "$LATEST_USER_MESSAGE" \
+    --arg last_assistant_message "$LAST_MSG" \
+    --arg stop_hook_active "$STOP_HOOK_ACTIVE" \
+    --arg cwd "$CWD" \
+    --arg model "$MODEL" \
+    --arg max_context_chars "$COMPLETION_MAX_CONTEXT_CHARS" \
+    '{
+      session_id: $session_id,
+      turn_id: $turn_id,
+      transcript_path: $transcript_path,
+      latest_user_message: $latest_user_message,
+      last_assistant_message: $last_assistant_message,
+      stop_hook_active: ($stop_hook_active == "true"),
+      cwd: $cwd,
+      model: $model,
+      max_context_chars: ($max_context_chars | tonumber? // 20000)
+    }'
+)"
+
+VERDICT="$(run_completion_verifier "$VERIFIER_PAYLOAD" "$CWD")"
+COMPLETE="$(printf '%s' "$VERDICT" | jq -r '.complete // false')"
+
+if [[ "$COMPLETE" == "true" ]]; then
+  exit 0
+fi
+
+VERDICT_REASON="$(printf '%s' "$VERDICT" | jq -r '.reason // "The completion verifier says the latest user goal is not complete."' 2>/dev/null || true)"
+NEXT_ACTION="$(printf '%s' "$VERDICT" | jq -r '.next_action // ""' 2>/dev/null || true)"
+if [[ -z "$NEXT_ACTION" || "$NEXT_ACTION" == "null" ]]; then
+  NEXT_ACTION="Continue working until the latest user goal is fully accomplished."
+fi
+
+REASON="$(build_taskmaster_stop_check_prompt "$LATEST_USER_MESSAGE" "$VERDICT_REASON" "$NEXT_ACTION" "$VERIFY_NOTE")"
+jq -n --arg reason "$REASON" '{ decision: "block", reason: $reason }'

@@ -9,8 +9,8 @@ output="$(
   jq -n --arg session_id "session-123" '{session_id: $session_id}' | "$SESSION_START_HOOK"
 )"
 
-if ! grep -F "lightweight completion check" <<<"$output" >/dev/null 2>&1; then
-  printf 'expected lightweight completion-check contract\n' >&2
+if ! grep -F "quiet completion verifier" <<<"$output" >/dev/null 2>&1; then
+  printf 'expected quiet completion-verifier contract\n' >&2
   printf '%s\n' "$output" >&2
   exit 1
 fi

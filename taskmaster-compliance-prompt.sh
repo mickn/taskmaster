@@ -41,31 +41,39 @@ build_taskmaster_session_contract() {
   local _done_signal="$1"
 
   cat <<EOF2
-This session uses a lightweight completion check.
+This session uses a quiet completion verifier.
 
-- When the Stop hook asks for a completion check, compare the latest user message against the work actually completed.
-- If the latest user goal is fully accomplished, provide the final answer normally.
-- If anything is missing, continue working instead of stopping.
+- When the Stop hook says the latest user goal is not complete, continue working immediately.
+- Stop naturally only after the latest user goal is fully accomplished.
 - Do not print hook markers or completion-token boilerplate in user-facing answers.
 EOF2
 }
 
 build_taskmaster_stop_check_prompt() {
   local latest_user_message="$1"
-  local verify_note="${2:-}"
+  local verifier_reason="${2:-The completion verifier says the latest user goal is not complete.}"
+  local next_action="${3:-Continue working until the latest user goal is fully accomplished.}"
+  local verify_note="${4:-}"
 
   if [[ -z "$latest_user_message" ]]; then
     latest_user_message="(No user message could be reconstructed from the hook payload, state, or transcript. Use the visible conversation context.)"
   fi
+  if [[ -z "$next_action" || "$next_action" == "null" ]]; then
+    next_action="Continue working until the latest user goal is fully accomplished."
+  fi
 
   cat <<EOF2
-Completion check before stopping.
+Goal not yet verified complete.
 
 Most recent user message:
 ${latest_user_message}
 
-Before you answer, ask yourself whether that latest user goal is fully accomplished by the work already done in this turn.
-If yes, provide the final answer normally.
-If no, do not provide a final answer yet. Continue working until the goal is fully accomplished, then stop naturally.${verify_note}
+Completion verifier verdict:
+${verifier_reason}
+
+Next required action:
+${next_action}
+
+Do not provide a final answer yet. Continue working until the latest user goal is fully accomplished, then stop naturally.${verify_note}
 EOF2
 }

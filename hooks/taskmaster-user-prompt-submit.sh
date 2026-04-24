@@ -2,8 +2,23 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck disable=SC1091
-source "$SCRIPT_DIR/../taskmaster-state.sh"
+
+taskmaster_file() {
+  local name="$1"
+  if [[ -f "$SCRIPT_DIR/$name" ]]; then
+    printf '%s/%s\n' "$SCRIPT_DIR" "$name"
+    return 0
+  fi
+  if [[ -f "$SCRIPT_DIR/../$name" ]]; then
+    printf '%s/%s\n' "$SCRIPT_DIR/../" "$name"
+    return 0
+  fi
+  printf 'taskmaster file not found: %s\n' "$name" >&2
+  return 1
+}
+
+# shellcheck disable=SC1090
+source "$(taskmaster_file taskmaster-state.sh)"
 
 INPUT="$(cat)"
 SESSION_ID="$(printf '%s' "$INPUT" | jq -r '.session_id // ""')"
@@ -15,6 +30,7 @@ is_taskmaster_internal_prompt() {
   [[ "$prompt" == \<hook_prompt* ]] && return 0
   [[ "$prompt" == Stop\ is\ blocked\ until\ completion\ is\ explicitly\ confirmed.* ]] && return 0
   [[ "$prompt" == Completion\ check\ before\ stopping.* ]] && return 0
+  [[ "$prompt" == Goal\ not\ yet\ verified\ complete.* ]] && return 0
   [[ "$prompt" == Recent\ tool\ errors\ were\ detected.* ]] && return 0
   return 1
 }

@@ -19,24 +19,24 @@ Taskmaster is built around one idea: progress is not completion.
   Compliance prompts force the model back to the user’s actual request, not its
   own local notion of “good enough”.
 - Low-noise enforcement:
-  Native Codex hooks continue the same turn once with a focused completion
-  check instead of requiring marker-token boilerplate in every final answer.
+  Native Codex hooks use a quiet semantic verifier instead of requiring
+  marker-token boilerplate in every final answer.
 
 ## Core Contract
 
 A run is complete when the assistant has satisfied the latest user goal and
-answers normally after the Stop hook's completion check.
+the Stop hook's semantic verifier confirms that the goal is done.
 
-Legacy `TASKMASTER_DONE::<session_id>` signals are still accepted for older
-sessions, but new Codex sessions do not require them.
+Legacy `TASKMASTER_DONE::<session_id>` signals are still accepted only when
+semantic completion verification is explicitly disabled.
 
 ### Codex Native Stop Contract
 
 The native Codex stop hook uses Codex's `decision: "block"` continuation path.
-On the first stop attempt for a turn, it asks Codex to compare the latest user
-message with the work already done. If anything is missing, Codex should keep
-working; if the goal is complete, it can answer normally and stop on the next
-pass.
+On every stop attempt, it asks a quiet completion verifier to compare the
+latest user message with the work already done. If anything is missing, Codex
+is continued in the same turn with the verifier's reason and next action. Stop
+is allowed only when the verifier returns `complete: true`.
 
 ## How It Works
 
@@ -45,8 +45,9 @@ pass.
   - Enables Codex hook support via `~/.codex/config.toml`.
   - `UserPromptSubmit` stores the exact user prompt that opened the turn.
   - The `Stop` hook prefers the current turn's stored prompt and falls back to the latest stored prompt or transcript reconstruction only when needed.
-  - The first stop attempt continues the same turn with a focused completion-check prompt.
-  - The next stop attempt is allowed through Codex's `stop_hook_active` flag, unless optional verification fails.
+  - Every stop attempt runs a quiet semantic completion verifier.
+  - If the verifier says the goal is incomplete, the hook blocks Stop and continues Codex with the reason and next action.
+  - Stop is allowed only when semantic verification passes.
   - Optional repo verification can be enforced with a shell command.
 - Claude path:
   - Registers a `Stop` command hook.
@@ -104,10 +105,23 @@ Run Claude normally after install. Taskmaster hook enforcement is automatic.
 
 - `TASKMASTER_VERIFY_COMMAND`:
   - Codex only.
-  - Runs a native verifier before stop is allowed after the completion-check pass.
+  - Runs a native verifier before semantic completion is checked.
 - `TASKMASTER_VERIFY_MAX_OUTPUT` (default `4000`):
   - Codex only.
   - Truncates verifier output echoed back into a block reason.
+- `TASKMASTER_COMPLETION_MODEL`:
+  - Codex only.
+  - Overrides the OpenAI model used by the quiet semantic completion verifier.
+  - Defaults to `gpt-5.4-mini`.
+- `TASKMASTER_COMPLETION_VERIFY` (default `1`):
+  - Codex only.
+  - Set to `0`, `false`, `off`, or `no` to disable semantic verification and fall back to the one-pass self-check compatibility mode.
+- `TASKMASTER_COMPLETION_VERIFIER_COMMAND`:
+  - Codex only.
+  - Replaces the built-in OpenAI verifier. The command receives verifier input JSON on stdin and must return JSON with `complete`, `reason`, and `next_action`.
+- `TASKMASTER_COMPLETION_MAX_CONTEXT_CHARS` (default `20000`):
+  - Codex only.
+  - Limits transcript context sent to the semantic verifier.
 - `TASKMASTER_MAX` (default `0`):
   - Claude only.
   - Limits stop-block warnings in hook checks.

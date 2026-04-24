@@ -57,6 +57,7 @@ copy_skill_files() {
   safe_copy "$SCRIPT_DIR/install.sh" "$skill_dir/install.sh"
   safe_copy "$SCRIPT_DIR/uninstall.sh" "$skill_dir/uninstall.sh"
   safe_copy "$SCRIPT_DIR/taskmaster-compliance-prompt.sh" "$skill_dir/taskmaster-compliance-prompt.sh"
+  safe_copy "$SCRIPT_DIR/taskmaster-completion-verifier.py" "$skill_dir/taskmaster-completion-verifier.py"
   safe_copy "$SCRIPT_DIR/taskmaster-state.sh" "$skill_dir/taskmaster-state.sh"
 
   safe_copy "$SCRIPT_DIR/check-completion.sh" "$skill_dir/check-completion.sh"
@@ -67,6 +68,7 @@ copy_skill_files() {
   chmod +x "$skill_dir/install.sh"
   chmod +x "$skill_dir/uninstall.sh"
   chmod +x "$skill_dir/taskmaster-compliance-prompt.sh"
+  chmod +x "$skill_dir/taskmaster-completion-verifier.py"
   chmod +x "$skill_dir/taskmaster-state.sh"
   chmod +x "$skill_dir/check-completion.sh"
   chmod +x "$skill_dir/hooks/taskmaster-session-start.sh"
