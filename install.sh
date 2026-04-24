@@ -236,27 +236,15 @@ def strip_taskmaster_entries(entries):
 hooks["SessionStart"] = strip_taskmaster_entries(hooks.get("SessionStart"))
 hooks["UserPromptSubmit"] = strip_taskmaster_entries(hooks.get("UserPromptSubmit"))
 hooks["Stop"] = strip_taskmaster_entries(hooks.get("Stop"))
+if not hooks["SessionStart"]:
+    hooks.pop("SessionStart", None)
 
-hooks["SessionStart"].append(
-    {
-        "matcher": "^(startup|resume|clear)$",
-        "hooks": [
-            {
-                "type": "command",
-                "command": session_start_command,
-                "statusMessage": "Loading completion contract...",
-                "timeout": 10,
-            }
-        ],
-    }
-)
 hooks["Stop"].append(
     {
         "hooks": [
             {
                 "type": "command",
                 "command": stop_command,
-                "statusMessage": "Checking completion...",
                 "timeout": 30,
             }
         ],
@@ -268,7 +256,6 @@ hooks["UserPromptSubmit"].append(
             {
                 "type": "command",
                 "command": user_prompt_submit_command,
-                "statusMessage": "Capturing task prompt...",
                 "timeout": 15,
             }
         ],

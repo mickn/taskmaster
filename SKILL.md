@@ -1,8 +1,8 @@
 ---
 name: taskmaster
 description: |
-  Native Codex SessionStart/Stop hooks plus a Claude stop hook
-  that keep work moving until an explicit parseable done signal is emitted.
+  Native Codex UserPromptSubmit/Stop hooks plus a Claude stop hook
+  that keep work moving until the latest user goal is complete.
 author: blader
 version: 5.0.0
 ---
@@ -13,29 +13,27 @@ Taskmaster uses native hooks to enforce completion without a wrapper process.
 
 ## How It Works
 
-1. **Codex SessionStart hook** injects a compact completion contract when a
-   session starts, resumes, or clears.
-2. **Codex Stop hook** reconstructs the active task from the transcript and
-   continues the same turn with the original compliance prompt when the done
-   token is missing.
-3. **Completion contract**:
-   - `TASKMASTER_DONE::<session_id>` only when the goal is truly complete
+1. **Codex UserPromptSubmit hook** captures the latest external user prompt for
+   the active turn.
+2. **Codex Stop hook** continues the same turn once with a focused completion
+   check that quotes the latest user message.
+3. **Completion behavior**:
+   - If the latest user goal is complete, answer normally.
+   - If anything is missing, continue working instead of stopping.
+   - Legacy `TASKMASTER_DONE::<session_id>` signals are still accepted for older
+     sessions, but new Codex sessions do not require them.
 4. **Optional verifier**:
    - If `TASKMASTER_VERIFY_COMMAND` is set, stop remains blocked until that
      command passes.
 5. **Claude path** keeps the existing stop-hook enforcement based on the done
    token plus the shared compliance prompt.
 
-## Parseable Done Signal
+## Codex Completion Check
 
-When the work is genuinely complete, the agent must include this exact line
-in its final response (on its own line):
-
-```text
-TASKMASTER_DONE::<session_id>
-```
-
-This gives external automation a deterministic completion marker to parse.
+Codex uses its native `decision: "block"` Stop hook continuation path. The
+first stop attempt asks the model to compare the latest user message against
+the work done. The next stop attempt is allowed through `stop_hook_active`
+unless optional verification fails.
 
 ## Configuration
 

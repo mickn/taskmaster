@@ -12,6 +12,7 @@ SESSION_ID="$(printf '%s' "$INPUT" | jq -r '.session_id // "unknown-session"')"
 TURN_ID="$(printf '%s' "$INPUT" | jq -r '.turn_id // ""')"
 TRANSCRIPT="$(printf '%s' "$INPUT" | jq -r '.transcript_path // ""')"
 LAST_MSG="$(printf '%s' "$INPUT" | jq -r '.last_assistant_message // ""')"
+STOP_HOOK_ACTIVE="$(printf '%s' "$INPUT" | jq -r '.stop_hook_active // false')"
 CWD="$(printf '%s' "$INPUT" | jq -r '.cwd // "."')"
 
 TRANSCRIPT="${TRANSCRIPT/#\~/$HOME}"
@@ -19,32 +20,23 @@ DONE_SIGNAL="TASKMASTER_DONE::${SESSION_ID}"
 VERIFY_CMD="${TASKMASTER_VERIFY_COMMAND:-}"
 VERIFY_MAX_OUTPUT="${TASKMASTER_VERIFY_MAX_OUTPUT:-4000}"
 STATE_PATH="$(taskmaster_turn_state_path "$SESSION_ID")"
+
 VERIFY_NOTE=""
 if [[ -n "$VERIFY_CMD" ]]; then
-  VERIFY_NOTE=$'\n\nA native verifier is enabled. Even if the done token is present, stop will stay blocked until this command passes:\n'"$VERIFY_CMD"
+  VERIFY_NOTE=$'\n\nA native verifier is enabled. Stop will remain blocked until this command passes:\n'"$VERIFY_CMD"
 fi
 
-transcript_has_recent_errors() {
+extract_state_from_transcript() {
   local transcript_path="$1"
-
-  [[ -f "$transcript_path" ]] || return 1
-  tail -40 "$transcript_path" 2>/dev/null | grep -qi '"is_error":\s*true'
-}
-
-extract_active_task_state_from_transcript() {
-  local transcript_path="$1"
-  local done_signal="$2"
-
   [[ -f "$transcript_path" ]] || return 0
   command -v python3 >/dev/null 2>&1 || return 0
 
-  python3 - "$transcript_path" "$done_signal" <<'PY'
+  python3 - "$transcript_path" <<'PY'
 import json
 import sys
 from pathlib import Path
 
 path = Path(sys.argv[1]).expanduser()
-done_signal = sys.argv[2]
 if not path.exists():
     raise SystemExit(0)
 
@@ -60,10 +52,10 @@ def normalize(text: str) -> str:
     return text.strip()
 
 
-def clip(text: str, limit: int = 1200) -> str:
+def clip(text: str, limit: int = 2500) -> str:
     if len(text) <= limit:
         return text
-    return text[: limit - 1].rstrip() + "…"
+    return text[: limit - 3].rstrip() + "..."
 
 
 def message_text_from_content(content):
@@ -133,18 +125,6 @@ def extract_role_and_text(obj):
     return None, None
 
 
-def extract_event_type(obj):
-    if not isinstance(obj, dict):
-        return None
-    if obj.get("type") != "event_msg":
-        return None
-    payload = obj.get("payload")
-    if not isinstance(payload, dict):
-        return None
-    event_type = payload.get("type")
-    return event_type if isinstance(event_type, str) else None
-
-
 def is_context_only_user_message(text: str) -> bool:
     stripped = text.lstrip()
     if stripped.startswith("# AGENTS.md instructions for "):
@@ -152,9 +132,18 @@ def is_context_only_user_message(text: str) -> bool:
     return stripped.startswith("<environment_context>")
 
 
-messages = []
-segments = []
-has_task_markers = False
+def is_taskmaster_internal_prompt(text: str) -> bool:
+    stripped = text.lstrip()
+    return (
+        stripped.startswith("<hook_prompt")
+        or stripped.startswith("Stop is blocked until completion is explicitly confirmed.")
+        or stripped.startswith("Completion check before stopping.")
+        or stripped.startswith("Recent tool errors were detected.")
+    )
+
+
+latest_user = ""
+last_assistant = ""
 with path.open("r", encoding="utf-8", errors="replace") as fh:
     for raw in fh:
         raw = raw.strip()
@@ -164,107 +153,14 @@ with path.open("r", encoding="utf-8", errors="replace") as fh:
             obj = json.loads(raw)
         except Exception:
             continue
-        event_type = extract_event_type(obj)
-        if event_type == "task_started":
-            has_task_markers = True
-            segments.append([])
-            continue
+
         role, text = extract_role_and_text(obj)
-        if role and text:
-            message = {"role": role, "text": text}
-            messages.append(message)
-            if has_task_markers:
-                if not segments:
-                    segments.append([])
-                segments[-1].append(message)
+        if role == "user" and text and not is_context_only_user_message(text) and not is_taskmaster_internal_prompt(text):
+            latest_user = text
+        elif role == "assistant" and text:
+            last_assistant = text
 
-last_done_idx = -1
-for i, message in enumerate(messages):
-    if message["role"] == "assistant" and done_signal in message["text"]:
-        last_done_idx = i
-
-
-def unique_preserve_order(values):
-    out = []
-    for value in values:
-        if value not in out:
-            out.append(value)
-    return out
-
-
-def user_texts(segment_messages):
-    return [
-        message["text"]
-        for message in segment_messages
-        if message["role"] == "user" and not is_context_only_user_message(message["text"])
-    ]
-
-
-segment = []
-segment_users = []
-all_users = user_texts(messages)
-last_assistant = ""
-if has_task_markers:
-    for candidate in reversed(segments):
-        candidate_users = user_texts(candidate)
-        if candidate_users:
-            segment = candidate
-            segment_users = candidate_users
-            break
-else:
-    segment = messages[last_done_idx + 1 :] if last_done_idx >= 0 else messages
-    segment_users = user_texts(segment)
-
-if not segment and messages:
-    segment = messages
-    if not segment_users:
-        segment_users = user_texts(segment)
-
-for message in reversed(segment):
-    if message["role"] == "assistant":
-        last_assistant = message["text"]
-        break
-
-
-anchor_blocks = []
-if has_task_markers and segment_users:
-    unique_segment = unique_preserve_order(segment_users)
-    root = unique_segment[0]
-    anchor_blocks.append("Current task root request for the active task:\n1. " + clip(root))
-    refinements = unique_segment[1:]
-    if refinements:
-        anchor_blocks.append(
-            "Current task refinements or overrides:\n"
-            + "\n\n".join(f"{i + 1}. {clip(msg)}" for i, msg in enumerate(refinements))
-        )
-elif last_done_idx >= 0:
-    if segment_users:
-        unique_segment = unique_preserve_order(segment_users)
-        root = unique_segment[0]
-        anchor_blocks.append("Current task root request, this started after the previous done token:\n1. " + clip(root))
-        refinements = unique_segment[1:]
-        if refinements:
-            anchor_blocks.append(
-                "Current task refinements or overrides:\n"
-                + "\n\n".join(f"{i + 1}. {clip(msg)}" for i, msg in enumerate(refinements))
-            )
-else:
-    recent = unique_preserve_order(all_users)
-    if recent:
-        root = recent[0]
-        anchor_blocks.append("Current task root request for the active task:\n1. " + clip(root))
-        refinements = recent[1:]
-        if refinements:
-            anchor_blocks.append(
-                "Current task refinements or overrides:\n"
-                + "\n\n".join(f"{i + 1}. {clip(msg)}" for i, msg in enumerate(refinements))
-            )
-
-anchor = "\n\n".join(anchor_blocks).strip()
-if len(anchor) > 4000:
-    anchor = anchor[:3999].rstrip() + "…"
-
-print(json.dumps({"goal_anchor": anchor, "last_assistant": last_assistant}))
+print(json.dumps({"latest_user_message": clip(latest_user), "last_assistant": last_assistant}))
 PY
 }
 
@@ -284,7 +180,7 @@ run_optional_verifier() {
     local truncated
     truncated="$(tail -c "$max_output" "$tmp_output" 2>/dev/null || true)"
     rm -f "$tmp_output"
-    jq -n --arg reason "Completion self-check passed, but native verification failed. Fix the remaining issues, rerun verification, and only then stop.
+    jq -n --arg reason "Native verification failed. Fix the remaining issues, rerun verification, and only then stop.
 
 Verification command:
 ${verifier_cmd}
@@ -298,51 +194,47 @@ ${truncated}" '{ decision: "block", reason: $reason }'
   return 0
 }
 
-load_turn_prompt_from_state() {
+load_latest_prompt_from_state() {
   local state_path="$1"
   local turn_id="$2"
-  [[ -n "$turn_id" && -f "$state_path" ]] || return 0
-  jq -r --arg turn_id "$turn_id" '.turns[$turn_id].prompt // ""' "$state_path" 2>/dev/null || true
+  [[ -f "$state_path" ]] || return 0
+  jq -r --arg turn_id "$turn_id" '.turns[$turn_id].prompt // .latest_prompt.prompt // ""' "$state_path" 2>/dev/null || true
 }
 
+has_legacy_completion_signal() {
+  local text="$1"
+  [[ -n "$text" ]] || return 1
+  grep -Fq "$DONE_SIGNAL" <<<"$text" 2>/dev/null || return 1
+  grep -Eq '(^|[[:space:]])GOAL_ACHIEVED::yes($|[[:space:]])' <<<"$text" 2>/dev/null
+}
+
+LATEST_USER_MESSAGE="$(load_latest_prompt_from_state "$STATE_PATH" "$TURN_ID")"
 LAST_MSG_FALLBACK=""
-GOAL_ANCHOR=""
-TURN_PROMPT="$(load_turn_prompt_from_state "$STATE_PATH" "$TURN_ID")"
+
 if [[ -f "$TRANSCRIPT" ]]; then
-  STATE_JSON="$(extract_active_task_state_from_transcript "$TRANSCRIPT" "$DONE_SIGNAL" || true)"
+  STATE_JSON="$(extract_state_from_transcript "$TRANSCRIPT" || true)"
   if [[ -n "$STATE_JSON" ]]; then
-    GOAL_ANCHOR="$(printf '%s' "$STATE_JSON" | jq -r '.goal_anchor // ""' 2>/dev/null || true)"
+    if [[ -z "$LATEST_USER_MESSAGE" ]]; then
+      LATEST_USER_MESSAGE="$(printf '%s' "$STATE_JSON" | jq -r '.latest_user_message // ""' 2>/dev/null || true)"
+    fi
     LAST_MSG_FALLBACK="$(printf '%s' "$STATE_JSON" | jq -r '.last_assistant // ""' 2>/dev/null || true)"
   fi
-fi
-
-if [[ -n "$TURN_PROMPT" ]]; then
-  GOAL_ANCHOR=$'Current task root request for the active task:\n1. '"$TURN_PROMPT"
 fi
 
 if [[ -z "$LAST_MSG" ]]; then
   LAST_MSG="$LAST_MSG_FALLBACK"
 fi
 
-HAS_RECENT_ERRORS=false
-if transcript_has_recent_errors "$TRANSCRIPT"; then
-  HAS_RECENT_ERRORS=true
+if has_legacy_completion_signal "$LAST_MSG"; then
+  run_optional_verifier "$VERIFY_CMD" "$CWD" "$VERIFY_MAX_OUTPUT" || exit 0
+  exit 0
 fi
 
-has_done_signal() {
-  local text="$1"
-
-  [[ -n "$text" ]] && grep -Fq "$DONE_SIGNAL" <<<"$text" 2>/dev/null
-}
-
-if ! has_done_signal "$LAST_MSG"; then
-  REASON="$(build_taskmaster_stop_block_reason "$DONE_SIGNAL" "$HAS_RECENT_ERRORS" "$VERIFY_NOTE" "$GOAL_ANCHOR")"
+if [[ "$STOP_HOOK_ACTIVE" != "true" ]]; then
+  REASON="$(build_taskmaster_stop_check_prompt "$LATEST_USER_MESSAGE" "$VERIFY_NOTE")"
   jq -n --arg reason "$REASON" '{ decision: "block", reason: $reason }'
   exit 0
 fi
 
-if run_optional_verifier "$VERIFY_CMD" "$CWD" "$VERIFY_MAX_OUTPUT"; then
-  exit 0
-fi
-
+run_optional_verifier "$VERIFY_CMD" "$CWD" "$VERIFY_MAX_OUTPUT" || exit 0
 exit 0

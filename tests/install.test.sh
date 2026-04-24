@@ -68,10 +68,11 @@ session_start_count = 0
 user_prompt_submit_count = 0
 stop_count = 0
 other_stop_count = 0
-for entry in hooks.get("hooks", {}).get("SessionStart", []):
-    for hook in entry.get("hooks", []):
-        if hook.get("command") == session_start:
-            session_start_count += 1
+if hooks.get("hooks", {}).get("SessionStart"):
+    for entry in hooks.get("hooks", {}).get("SessionStart", []):
+        for hook in entry.get("hooks", []):
+            if hook.get("command") == session_start:
+                session_start_count += 1
 
 for entry in hooks.get("hooks", {}).get("UserPromptSubmit", []):
     for hook in entry.get("hooks", []):
@@ -85,8 +86,8 @@ for entry in hooks.get("hooks", {}).get("Stop", []):
         if hook.get("command") == stop:
             stop_count += 1
 
-if session_start_count != 1:
-    raise SystemExit(f"expected one taskmaster session-start hook, got {session_start_count}")
+if session_start_count != 0:
+    raise SystemExit(f"expected no taskmaster session-start hook, got {session_start_count}")
 if user_prompt_submit_count != 1:
     raise SystemExit(f"expected one taskmaster user-prompt-submit hook, got {user_prompt_submit_count}")
 if stop_count != 1:
@@ -131,7 +132,7 @@ stop_count = sum(
     if hook.get("command") == stop
 )
 
-if session_start_count != 1 or user_prompt_submit_count != 1 or stop_count != 1:
+if session_start_count != 0 or user_prompt_submit_count != 1 or stop_count != 1:
     raise SystemExit(
         "expected install to be idempotent; got "
         f"session_start={session_start_count}, "

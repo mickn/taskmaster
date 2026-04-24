@@ -14,6 +14,7 @@ is_taskmaster_internal_prompt() {
   local prompt="$1"
   [[ "$prompt" == \<hook_prompt* ]] && return 0
   [[ "$prompt" == Stop\ is\ blocked\ until\ completion\ is\ explicitly\ confirmed.* ]] && return 0
+  [[ "$prompt" == Completion\ check\ before\ stopping.* ]] && return 0
   [[ "$prompt" == Recent\ tool\ errors\ were\ detected.* ]] && return 0
   return 1
 }
@@ -53,6 +54,11 @@ if [[ -f "$STATE_PATH" ]]; then
     --arg captured_at "$CAPTURED_AT" \
     '.session_id = $session_id
     | .updated_at = $captured_at
+    | .latest_prompt = {
+        turn_id: $turn_id,
+        prompt: $prompt,
+        captured_at: $captured_at
+      }
     | .turns = (.turns // {})
     | .turns[$turn_id] = {
         prompt: $prompt,
@@ -68,6 +74,11 @@ else
     '{
       session_id: $session_id,
       updated_at: $captured_at,
+      latest_prompt: {
+        turn_id: $turn_id,
+        prompt: $prompt,
+        captured_at: $captured_at
+      },
       turns: {
         ($turn_id): {
           prompt: $prompt,

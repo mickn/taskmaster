@@ -38,50 +38,34 @@ EOF2
 }
 
 build_taskmaster_session_contract() {
-  local done_signal="$1"
+  local _done_signal="$1"
 
   cat <<EOF2
-This session uses a completion contract.
+This session uses a lightweight completion check.
 
-- Do not stop just because you made progress.
-- Stop only when the user's current request is fully complete.
-- The Stop hook may continue the same turn if you try to stop without explicit completion.
-- When and only when the current request is truly complete, include this exact line in your final response on its own line:
-  ${done_signal}
+- When the Stop hook asks for a completion check, compare the latest user message against the work actually completed.
+- If the latest user goal is fully accomplished, provide the final answer normally.
+- If anything is missing, continue working instead of stopping.
+- Do not print hook markers or completion-token boilerplate in user-facing answers.
 EOF2
 }
 
-build_taskmaster_stop_block_reason() {
-  local done_signal="$1"
-  local recent_errors="${2:-false}"
-  local verify_note="${3:-}"
-  local goal_anchor="${4:-}"
+build_taskmaster_stop_check_prompt() {
+  local latest_user_message="$1"
+  local verify_note="${2:-}"
 
-  local preamble="Stop is blocked until completion is explicitly confirmed."
-  if [[ "$recent_errors" == "true" ]]; then
-    preamble="Recent tool errors were detected. Resolve them before declaring done."
-  fi
-
-  local goal_block=""
-  if [[ -n "$goal_anchor" ]]; then
-    goal_block=$(cat <<EOF2
-
-Current task anchor reconstructed from the transcript:
-${goal_anchor}
-EOF2
-)
-  fi
-
-  local verifier_block=""
-  if [[ -n "$verify_note" ]]; then
-    verifier_block="${verify_note}"
+  if [[ -z "$latest_user_message" ]]; then
+    latest_user_message="(No user message could be reconstructed from the hook payload, state, or transcript. Use the visible conversation context.)"
   fi
 
   cat <<EOF2
-${preamble}
+Completion check before stopping.
 
-${goal_block}
+Most recent user message:
+${latest_user_message}
 
-$(build_taskmaster_compliance_prompt "$done_signal")${verifier_block}
+Before you answer, ask yourself whether that latest user goal is fully accomplished by the work already done in this turn.
+If yes, provide the final answer normally.
+If no, do not provide a final answer yet. Continue working until the goal is fully accomplished, then stop naturally.${verify_note}
 EOF2
 }

@@ -18,39 +18,35 @@ Taskmaster is built around one idea: progress is not completion.
 - Goal re-anchoring:
   Compliance prompts force the model back to the user’s actual request, not its
   own local notion of “good enough”.
-- Automation-safe signaling:
-  A deterministic done token makes completion parseable for stop hooks and
-  external tooling.
+- Low-noise enforcement:
+  Native Codex hooks continue the same turn once with a focused completion
+  check instead of requiring marker-token boilerplate in every final answer.
 
 ## Core Contract
 
-A run is complete only when the assistant emits:
+A run is complete when the assistant has satisfied the latest user goal and
+answers normally after the Stop hook's completion check.
 
-```text
-TASKMASTER_DONE::<session_id>
-```
+Legacy `TASKMASTER_DONE::<session_id>` signals are still accepted for older
+sessions, but new Codex sessions do not require them.
 
 ### Codex Native Stop Contract
 
-The native Codex stop hook preserves the same completion signal as the original
-Taskmaster:
-
-```text
-TASKMASTER_DONE::<session_id>
-```
+The native Codex stop hook uses Codex's `decision: "block"` continuation path.
+On the first stop attempt for a turn, it asks Codex to compare the latest user
+message with the work already done. If anything is missing, Codex should keep
+working; if the goal is complete, it can answer normally and stop on the next
+pass.
 
 ## How It Works
 
 - Codex path:
-  - Installs native `SessionStart`, `UserPromptSubmit`, and `Stop` hooks in `~/.codex/hooks.json`.
+  - Installs native `UserPromptSubmit` and `Stop` hooks in `~/.codex/hooks.json`.
   - Enables Codex hook support via `~/.codex/config.toml`.
-  - `SessionStart` injects a small durable completion contract into the session.
   - `UserPromptSubmit` stores the exact user prompt that opened the turn.
-  - The `Stop` hook prefers that stored prompt and falls back to transcript reconstruction only when needed.
-  - If the latest assistant message already contains the done token, stop is
-    allowed immediately.
-  - Otherwise the `Stop` hook continues the same turn with the original rich
-    Taskmaster compliance prompt plus the reconstructed task anchor.
+  - The `Stop` hook prefers the current turn's stored prompt and falls back to the latest stored prompt or transcript reconstruction only when needed.
+  - The first stop attempt continues the same turn with a focused completion-check prompt.
+  - The next stop attempt is allowed through Codex's `stop_hook_active` flag, unless optional verification fails.
   - Optional repo verification can be enforced with a shell command.
 - Claude path:
   - Registers a `Stop` command hook.
@@ -81,8 +77,7 @@ Installed artifacts:
 - Codex:
   - `~/.codex/skills/taskmaster/`
   - `~/.codex/config.toml` updated with `codex_hooks = true`
-  - `~/.codex/hooks.json` updated with Taskmaster `SessionStart`, `UserPromptSubmit`, and `Stop`
-    hooks
+  - `~/.codex/hooks.json` updated with Taskmaster `UserPromptSubmit` and `Stop` hooks
 - Claude:
   - `~/.claude/skills/taskmaster/`
   - `~/.claude/hooks/taskmaster-check-completion.sh`
@@ -98,8 +93,8 @@ Run Codex normally:
 codex [args]
 ```
 
-The Taskmaster hooks activate automatically on startup, resume, clear, and
-stop.
+The Taskmaster hooks activate automatically when a user prompt is submitted and
+when a turn stops.
 
 ### Claude
 
@@ -109,7 +104,7 @@ Run Claude normally after install. Taskmaster hook enforcement is automatic.
 
 - `TASKMASTER_VERIFY_COMMAND`:
   - Codex only.
-  - Runs a native verifier before stop is allowed after the done token is present.
+  - Runs a native verifier before stop is allowed after the completion-check pass.
 - `TASKMASTER_VERIFY_MAX_OUTPUT` (default `4000`):
   - Codex only.
   - Truncates verifier output echoed back into a block reason.
